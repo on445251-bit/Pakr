@@ -32,9 +32,6 @@ jobs:
           distribution: temurin
           cache: gradle
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
@@ -165,6 +162,7 @@ jobs:
           ls -la /tmp/signed/
           echo "SIGNED_DIR=/tmp/signed" >> $GITHUB_ENV
           echo "APK_NAME=${SAFE}_${VER}" >> $GITHUB_ENV
+
       - name: Upload arm64 APK
         uses: actions/upload-artifact@v4
         with:
