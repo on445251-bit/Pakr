@@ -112,8 +112,19 @@ jobs:
           python3 Scripts/process_icon.py
 
       - name: Build APK (arm64 + armeabi-v7a)
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.internal.http.socketTimeout=120000 -Dorg.gradle.internal.http.connectionTimeout=120000"
         run: |
           chmod +x ./gradlew
+          # 若 wrapper 下载超时，使用带重试的 curl 提前预取分发包
+          if [ ! -d "$HOME/.gradle/wrapper/dists/gradle-8.2-bin" ]; then
+            for i in 1 2 3; do
+              ./gradlew --version && break || {
+                echo "Gradle wrapper init failed, retrying with curl..."
+                curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 -o /tmp/gradle-8.2-bin.zip "https://services.gradle.org/distributions/gradle-8.2-bin.zip" || true
+              }
+            done
+          fi
           ./gradlew assembleRelease --no-daemon
 
       - name: Sign APK
