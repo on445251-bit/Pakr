@@ -23,7 +23,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -34,7 +33,6 @@ import kotlin.math.abs
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
-    private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var progressBar: TopProgressBar
     private lateinit var overlay: View
     private lateinit var spinner: IOSSpinnerView
@@ -87,28 +85,9 @@ class MainActivity : AppCompatActivity() {
         overlay     = findViewById(R.id.overlay)
         spinner     = findViewById(R.id.spinner)
         loadingText = findViewById(R.id.loadingText)
-        swipeRefresh = findViewById(R.id.swipeRefresh)
-        swipeRefresh.setColorSchemeColors(
-            android.graphics.Color.parseColor("#6366F1")
-        )
-        // 触发距离设为 140dp（接近 Chrome），避免轻划误触
-        val density = resources.displayMetrics.density
-        val triggerDp = 120
-        try {
-            val field = androidx.swiperefreshlayout.widget.SwipeRefreshLayout::class.java
-                .getDeclaredField("mTotalDragDistance")
-            field.isAccessible = true
-            field.setFloat(swipeRefresh, triggerDp * density)
-        } catch (_: Exception) {}
-        swipeRefresh.setProgressViewOffset(false, 0, (triggerDp * density).toInt())
-        swipeRefresh.setOnRefreshListener {
-            forceShowOverlay()
-            // 稍等 50ms 再 reload，确保 overlay 已完全显示后才清空页面
-            handler.postDelayed({ webView.reload() }, 50)
-        }
         showOverlay()
         setupWebView()
-        setupEdgeSwipe()
+        setupGestureHandling()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -155,7 +134,6 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                swipeRefresh.isRefreshing = false
                 fetchThemeColor(view)
                 handler.removeCallbacks(delayHideRunnable)
                 // 用 JS 检测页面真正渲染完成（两帧后），再隐藏 overlay
@@ -189,7 +167,6 @@ class MainActivity : AppCompatActivity() {
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame) {
-                    swipeRefresh.isRefreshing = false
                     handler.removeCallbacks(delayHideRunnable)
                     hideOverlay()
                     view.loadData(errorHtml(), "text/html", "UTF-8")
@@ -205,7 +182,6 @@ class MainActivity : AppCompatActivity() {
             // 修复：HTTP 4xx/5xx 错误显示友好页面
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
                 if (request.isForMainFrame && (errorResponse.statusCode >= 400)) {
-                    swipeRefresh.isRefreshing = false
                     handler.removeCallbacks(delayHideRunnable)
                     hideOverlay()
                     view.loadData(errorHtml(), "text/html", "UTF-8")
@@ -300,13 +276,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
         // 键盘弹出适配：全屏模式下 adjustResize 失效，手动监听 IME Insets 调整容器高度
-        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(swipeRefresh) { view, insets ->
+        val rootView = findViewById<View>(R.id.rootView)
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(rootView) { view, insets ->
             val imeInsets = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.ime())
-            val lp = view.layoutParams as android.widget.FrameLayout.LayoutParams
-            lp.bottomMargin = imeInsets.bottom
-            view.layoutParams = lp
-            // WebView padding 清零，用 marginBottom 控制
-            webView.setPadding(0, 0, 0, 0)
+            // 根布局的 LayoutParams 由 setContentView 的父容器生成，未必是 FrameLayout 的；
+            // 用 MarginLayoutParams 兼容，避免 ClassCastException 把整个 Activity 搞崩。
+            val lp = view.layoutParams
+            if (lp is android.view.ViewGroup.MarginLayoutParams) {
+                lp.bottomMargin = imeInsets.bottom
+                view.layoutParams = lp
+            }
             insets
         }
 
@@ -331,40 +310,6 @@ class MainActivity : AppCompatActivity() {
         }, "_pakrBridge")
         // UA：移动版 Chrome（无 wv 标识），上传时临时切桌面UA
         webView.settings.userAgentString = MOBILE_UA
-        // 实时控制：WebView 不在顶部时禁用下拉刷新，防止滚动误触和打断 CF 验证
-        // 防误触：只有页面静止在顶部时才启用下拉刷新
-        var lastScrollY = 0
-        var isTouching = false
-        webView.setOnScrollChangeListener { _, _, scrollY, _, _ ->
-            lastScrollY = scrollY
-            if (!isTouching) {
-                // 手指不在屏幕上时（fling 中），页面不在顶部就禁用
-                if (scrollY > 0) swipeRefresh.isEnabled = false
-            }
-        }
-        webView.setOnTouchListener { _, event ->
-            when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    isTouching = true
-                    // 手指按下时根据当前位置决定是否启用
-                    swipeRefresh.isEnabled = (lastScrollY == 0)
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    // 滑动过程中不在顶部就立即禁用
-                    if (lastScrollY > 0) swipeRefresh.isEnabled = false
-                }
-                android.view.MotionEvent.ACTION_UP,
-                android.view.MotionEvent.ACTION_CANCEL -> {
-                    isTouching = false
-                    // 手指抬起后延迟 300ms 再判断（等 fling 惯性结束）
-                    swipeRefresh.isEnabled = false
-                    handler.postDelayed({
-                        swipeRefresh.isEnabled = (lastScrollY == 0)
-                    }, 300)
-                }
-            }
-            false
-        }
         webView.loadUrl(APP_URL)
     }
 
@@ -404,43 +349,96 @@ class MainActivity : AppCompatActivity() {
         handler.postDelayed(timeoutRunnable, 30_000L)
     }
 
-    // 边缘滑动手势：左边缘右滑=后退，右边缘左滑=前进
+    // 手势：屏幕左/右边缘横滑 = 后退/前进；双指下滑 = 刷新。
+    // 关键点：OnTouchListener 永远返回 false，只"旁听"事件，纵向滚动全部留给 WebView。
+    // 旧实现用两个 20dp 宽、match_parent 高的透明 View 覆盖在 WebView 上，从边缘起手的
+    // 纵向滑动会被它们吃掉（GestureDetector 在 ACTION_DOWN 就消费了事件流）。
     @android.annotation.SuppressLint("ClickableViewAccessibility")
-    private fun setupEdgeSwipe() {
-        val edgeLeft  = findViewById<View>(R.id.edgeLeft)
-        val edgeRight = findViewById<View>(R.id.edgeRight)
+    private fun setupGestureHandling() {
+        val density = resources.displayMetrics.density
+        val edgeWidthPx = 20f * density
+        val refreshPullPx = 140f * density
+        var edgeSide = 0
+        var pullStartY = 0f
+        var pullFired = false
 
-        fun makeGesture(onSwipeRight: (() -> Unit)? = null, onSwipeLeft: (() -> Unit)? = null)
-            = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-                override fun onDown(e: MotionEvent) = true
-                override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
-                    val dx = e2.x - (e1?.x ?: e2.x)
-                    val dy = e2.y - (e1?.y ?: e2.y)
-                    if (abs(dx) < EDGE_SWIPE_MIN_X) return false
-                    if (abs(dy) > EDGE_SWIPE_MAX_Y) return false
-                    if (abs(vx) < EDGE_SWIPE_MIN_V) return false
-                    return if (dx > 0) { onSwipeRight?.invoke(); onSwipeRight != null }
-                    else               { onSwipeLeft?.invoke();  onSwipeLeft  != null }
+        fun averageY(event: MotionEvent): Float {
+            var sum = 0f
+            for (i in 0 until event.pointerCount) sum += event.getY(i)
+            return sum / event.pointerCount
+        }
+
+        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                if (edgeSide == 0) return false
+                val dx = e2.x - (e1?.x ?: e2.x)
+                val dy = e2.y - (e1?.y ?: e2.y)
+                if (abs(dx) < EDGE_SWIPE_MIN_X) return false
+                if (abs(dy) > EDGE_SWIPE_MAX_Y) return false
+                if (abs(vx) < EDGE_SWIPE_MIN_V) return false
+                return if (edgeSide < 0 && dx > 0) goBackWithOverlay()
+                else if (edgeSide > 0 && dx < 0) goForwardWithOverlay()
+                else false
+            }
+        })
+
+        webView.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    edgeSide = when {
+                        event.x <= edgeWidthPx -> -1
+                        event.x >= webView.width - edgeWidthPx -> 1
+                        else -> 0
+                    }
+                    if (edgeSide != 0) detector.onTouchEvent(event)
+                    pullStartY = event.y
+                    pullFired = false
                 }
-            })
-
-        val leftGesture  = makeGesture(onSwipeRight = {
-            if (webView.canGoBack()) {
-                forceShowOverlay()
-                handler.postDelayed({ webView.goBack() }, 50)
-                handler.postDelayed({ if (overlayVisible) hideOverlay() }, 1500)
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    pullStartY = averageY(event)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (edgeSide != 0) detector.onTouchEvent(event)
+                    if (!pullFired && event.pointerCount >= 2 &&
+                        averageY(event) - pullStartY > refreshPullPx
+                    ) {
+                        pullFired = true
+                        reloadWithOverlay()
+                    }
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    pullStartY = averageY(event)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (edgeSide != 0) detector.onTouchEvent(event)
+                    edgeSide = 0
+                    pullFired = false
+                }
             }
-        })
-        val rightGesture = makeGesture(onSwipeLeft = {
-            if (webView.canGoForward()) {
-                forceShowOverlay()
-                handler.postDelayed({ webView.goForward() }, 50)
-                handler.postDelayed({ if (overlayVisible) hideOverlay() }, 1500)
-            }
-        })
+            false
+        }
+    }
 
-        edgeLeft.setOnTouchListener  { _, e -> leftGesture.onTouchEvent(e) }
-        edgeRight.setOnTouchListener { _, e -> rightGesture.onTouchEvent(e) }
+    private fun goBackWithOverlay(): Boolean {
+        if (!webView.canGoBack()) return false
+        forceShowOverlay()
+        handler.postDelayed({ webView.goBack() }, 50)
+        handler.postDelayed({ if (overlayVisible) hideOverlay() }, 1500)
+        return true
+    }
+
+    private fun goForwardWithOverlay(): Boolean {
+        if (!webView.canGoForward()) return false
+        forceShowOverlay()
+        handler.postDelayed({ webView.goForward() }, 50)
+        handler.postDelayed({ if (overlayVisible) hideOverlay() }, 1500)
+        return true
+    }
+
+    private fun reloadWithOverlay() {
+        forceShowOverlay()
+        handler.postDelayed({ webView.reload() }, 50)
     }
 
     // 强制显示 overlay，不受 overlayVisible 守卫限制（用于 reload 等场景）
